@@ -1,0 +1,626 @@
+package dev.skycraft.client;
+
+import dev.skycraft.SkyCraft;
+import dev.skycraft.client.render.WorldExporter;
+import dev.skycraft.link.Proto;
+import dev.skycraft.link.SkyLink;
+import dev.skycraft.world.SkyCollision;
+import net.minecraft.client.Camera;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.phys.Vec3;
+//#if MC_1_21_1
+//$$ import org.lwjgl.glfw.GLFW;
+//#else
+import org.lwjgl.sdl.SDLVideo;
+//#endif
+
+/**
+ * Per-frame glue between the Minecraft client and Skyrim. Everything here runs on the render
+ * thread, called from MinecraftMixin.
+ */
+public final class SkyClient {
+	private static final boolean SHOW_WINDOW = Boolean.getBoolean("skycraft.showWindow");
+	// Started by Skyrim (SkyCraft's bundled instance passes -Dskycraft.startHidden=true): no window and
+	// no title-screen music from the first frame, even while Skyrim is paused (Alt-Tabbed) and the
+	// two haven't linked up yet. Otherwise the window only goes once Skyrim is there.
+	private static final boolean START_HIDDEN = Boolean.getBoolean("skycraft.startHidden");
+	private static boolean startedHidden;
+
+	private static final SkyLink.SkyState sky = new SkyLink.SkyState();
+	private static final SkyLink.McState mc = new SkyLink.McState();
+	private static volatile boolean linked;
+	private static boolean tookOver;
+	private static boolean windowHidden;
+	private static int appliedViewportW, appliedViewportH;
+
+	// Teleport / hold state: Skyrim decides where the player is after loads, doors and respawns.
+	private static int lastTeleportSeq = -1;
+	private static int teleportAck;
+	private static boolean teleportPending;
+	private static LocalPlayer lastPlayer;
+	private static Vec3 holdPos;
+	private static Vec3 unlinkedHold;
+	private static long holdSince;
+	private static long qpcFreq;
+	private static LocalPlayer eyePlayer;
+	private static float eyeSmoothed;
+	private static long frameCounter;
+	private static int lastPacedSeq;
+	private static boolean skyrimStalled;
+	private static int exporterErrors;
+	//#if MC_1_21_1
+	//$$ // 1.21.1's Camera has no getFov(): GameRenderer's FOV modifier, eased per tick the same way (tickFov).
+	//$$ private static float fovModifier = 1.0F, oldFovModifier = 1.0F;
+	//#endif
+
+	private SkyClient() {
+	}
+
+	public static boolean linked() {
+		return linked;
+	}
+
+	/**
+	 * True once Skyrim has connected in this session. From then on Minecraft never touches the
+	 * real mouse or keyboard again (even if Skyrim closes), since its window is hidden.
+	 */
+	public static boolean tookOver() {
+		return tookOver;
+	}
+
+	/**
+	 * FalloutCraft: the height of Fallout's own ground at (x, z), from the grid Fallout sends each
+	 * frame around the player (bilinear), or NaN outside it / where Fallout has none.
+	 */
+	public static double falloutGroundAt(double x, double z) {
+		int n = sky.groundN;
+		float step = sky.groundStep;
+		if (n != Proto.GROUND_GRID || !(step > 0.0F)) {
+			return Double.NaN;
+		}
+		double fx = (x - sky.groundX0) / step, fz = (z - sky.groundZ0) / step;
+		if (fx < 0 || fz < 0 || fx > n - 1 || fz > n - 1) {
+			return Double.NaN;
+		}
+		int i = Math.min((int) fx, n - 2), j = Math.min((int) fz, n - 2);
+		double tx = fx - i, tz = fz - j;
+		float a = sky.groundY[i + j * n], b = sky.groundY[i + 1 + j * n], c = sky.groundY[i + (j + 1) * n], d = sky.groundY[i + 1 + (j + 1) * n];
+		// One corner missing (a body or a gap in the way of Fallout's pick): stand in the others' mean.
+		int missing = (Float.isNaN(a) ? 1 : 0) + (Float.isNaN(b) ? 1 : 0) + (Float.isNaN(c) ? 1 : 0) + (Float.isNaN(d) ? 1 : 0);
+		if (missing > 1) {
+			return Double.NaN;
+		}
+		if (missing == 1) {
+			float mean = ((Float.isNaN(a) ? 0 : a) + (Float.isNaN(b) ? 0 : b) + (Float.isNaN(c) ? 0 : c) + (Float.isNaN(d) ? 0 : d)) / 3.0F;
+			a = Float.isNaN(a) ? mean : a;
+			b = Float.isNaN(b) ? mean : b;
+			c = Float.isNaN(c) ? mean : c;
+			d = Float.isNaN(d) ? mean : d;
+		}
+		// Corners at very different heights are an edge (a curb, a wall): no ground between them.
+		float lo = Math.min(Math.min(a, b), Math.min(c, d)), hi = Math.max(Math.max(a, b), Math.max(c, d));
+		if (hi - lo > 0.6F) {
+			return Double.NaN;
+		}
+		return (a * (1 - tx) + b * tx) * (1 - tz) + (c * (1 - tx) + d * tx) * tz;
+	}
+
+	public static SkyLink.SkyState sky() {
+		return sky;
+	}
+
+	/** Start of Minecraft.runTick: pull state and input from Skyrim before anything else runs. */
+	public static void beginFrame() {
+		SkyLink.poll();
+		quitWithSkyrim(Minecraft.getInstance());
+		if (START_HIDDEN && !startedHidden) {
+			startedHidden = true;
+			Minecraft minecraft = Minecraft.getInstance();
+			hideWindowOnce(minecraft);
+			minecraft.options.getSoundSourceOptionInstance(net.minecraft.sounds.SoundSource.MUSIC).set(0.0);
+			minecraft.getMusicManager().stopPlaying();
+		}
+		boolean nowLinked = SkyLink.active();
+		if (nowLinked) {
+			SkyLink.readSkyState(sky); // on a torn read we simply keep last frame's state
+			dev.skycraft.world.SkyWater.refresh();
+		} else {
+			dev.skycraft.world.SkyWater.clear();
+		}
+		if (nowLinked != linked) {
+			linked = nowLinked;
+			SkyCraft.LOG.info("SkyCraft: Skyrim link {}", linked ? "up" : "down");
+			if (linked) {
+				tookOver = true;
+				unlinkedHold = null;
+				SkyCollision.startConsumer();
+				applyLinkedOptions();
+			} else {
+				InputBridge.releaseAll();
+				LocalPlayer player = Minecraft.getInstance().player;
+				unlinkedHold = player != null ? player.position() : null;
+			}
+		}
+		if (!linked) {
+			return;
+		}
+
+		Minecraft minecraft = Minecraft.getInstance();
+		hideWindowOnce(minecraft);
+		applyViewportSize(minecraft);
+		MirrorWorld.openWhenReady(minecraft);
+
+		if (sky.menuOpen() || sky.loading()) {
+			InputBridge.releaseAll();
+		}
+		InputBridge.drain(minecraft);
+		ProxySync.frame(minecraft);
+
+		LocalPlayer player = minecraft.player;
+		if (player == null) {
+			lastPlayer = null;
+			return;
+		}
+
+		// A new player object means we just joined or respawned: put it where Skyrim's player is.
+		if (player != lastPlayer) {
+			lastPlayer = player;
+			teleportPending = true;
+		}
+		if (sky.teleportSeq != lastTeleportSeq) {
+			lastTeleportSeq = sky.teleportSeq;
+			teleportPending = true;
+		}
+		if (teleportPending && sky.inGame() && !sky.loading()) {
+			requestTeleport(minecraft, sky.x, sky.y, sky.z, sky.yaw, sky.pitch);
+			teleportAck = sky.teleportSeq;
+			teleportPending = false;
+			holdPos = new Vec3(sky.x, sky.y, sky.z);
+		}
+
+		// Look direction is driven by Skyrim (zero-latency camera); MC uses it for everything else.
+		//#if MC_1_21_1
+		//$$ if (minecraft.screen == null) {
+		//#else
+		if (minecraft.gui.screen() == null) {
+		//#endif
+			player.setYRot(sky.yaw);
+			player.setXRot(sky.pitch);
+			player.yRotO = sky.yaw;
+			player.xRotO = sky.pitch;
+		}
+	}
+
+	// Minecraft is started with Skyrim (the SKSE plugin launches it), so it goes when that Skyrim has
+	// closed for good: saved and shut down the normal way. -Dskycraft.quitWithSkyrim=false keeps it
+	// running instead (development: restarting Skyrim without restarting Minecraft).
+	private static final boolean QUIT_WITH_SKYRIM = Boolean.parseBoolean(System.getProperty("skycraft.quitWithSkyrim", "true"));
+	private static long skyrimGoneSince;
+	private static long nextSkyrimCheck;
+	// Started hidden by Skyrim but never connected: nobody can see or use this Minecraft, and it
+	// would stop the next Skyrim from starting a fresh one ("already running"). It goes after this.
+	private static final long NEVER_CONNECTED_QUIT_MS = 10 * 60 * 1000;
+	private static final long STARTED_AT = System.currentTimeMillis();
+	private static boolean gaveUpWaiting;
+
+	private static void quitWithSkyrim(Minecraft minecraft) {
+		// FalloutCraft: the plugin flips bit 30 of its pid to say "send everything again" (a save was
+		// loaded); the process is the same. Reading it as a pid made Minecraft think the game had
+		// closed and quit 5 s later (only outside `gradlew runClient`, which turns this check off).
+		int pid = SkyLink.skyrimPid() & ~0x40000000;
+		long now = System.currentTimeMillis();
+		if (QUIT_WITH_SKYRIM && START_HIDDEN && pid == 0 && !tookOver && !gaveUpWaiting && now - STARTED_AT > NEVER_CONNECTED_QUIT_MS) {
+			gaveUpWaiting = true;
+			SkyCraft.LOG.warn("SkyCraft: started hidden but Skyrim never connected in {} minutes; quitting", NEVER_CONNECTED_QUIT_MS / 60000);
+			minecraft.stop();
+			return;
+		}
+		if (!QUIT_WITH_SKYRIM || pid == 0 || now < nextSkyrimCheck) {
+			return;
+		}
+		nextSkyrimCheck = now + 1000;
+		if (ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false)) {
+			skyrimGoneSince = 0;
+			return;
+		}
+		if (skyrimGoneSince == 0) {
+			skyrimGoneSince = now;
+		} else if (now - skyrimGoneSince > 5000) {
+			SkyCraft.LOG.info("SkyCraft: Skyrim (pid {}) has closed; saving and quitting", pid);
+			minecraft.stop();
+		}
+	}
+
+	/** Called at the end of every client tick. */
+	public static void clientTick(Minecraft minecraft) {
+		MirrorWorld.tick(minecraft);
+		DiscordPresence.tick(minecraft);
+		SkyDigClient.tick(minecraft);
+		freezeWhileUnlinked(minecraft);
+		holdUntilReady(minecraft);
+		publishTick(minecraft);
+		//#if MC_1_21_1
+		//$$ tickFov(minecraft);
+		//#endif
+	}
+	//#if MC_1_21_1
+	//$$
+	//$$ /** GameRenderer.tickFov() in 1.21.1 (its fovModifier fields are private). */
+	//$$ private static void tickFov(Minecraft minecraft) {
+	//$$ 	float target = minecraft.getCameraEntity() instanceof net.minecraft.client.player.AbstractClientPlayer p ? p.getFieldOfViewModifier() : 1.0F;
+	//$$ 	oldFovModifier = fovModifier;
+	//$$ 	fovModifier += (target - fovModifier) * 0.5F;
+	//$$ 	fovModifier = net.minecraft.util.Mth.clamp(fovModifier, 0.1F, 1.5F);
+	//$$ }
+	//$$
+	//$$ /** GameRenderer.getFov(camera, partial, true) in 1.21.1 (private there). */
+	//$$ private static float fov(Minecraft minecraft, Camera camera, float partial) {
+	//$$ 	double fov = minecraft.options.fov().get().intValue();
+	//$$ 	fov *= net.minecraft.util.Mth.lerp(partial, oldFovModifier, fovModifier);
+	//$$ 	if (camera.getEntity() instanceof net.minecraft.world.entity.LivingEntity living && living.isDeadOrDying()) {
+	//$$ 		float t = Math.min(living.deathTime + partial, 20.0F);
+	//$$ 		fov /= (1.0F - 500.0F / (t + 500.0F)) * 2.0F + 1.0F;
+	//$$ 	}
+	//$$ 	var fluid = camera.getFluidInCamera();
+	//$$ 	if (fluid == net.minecraft.world.level.material.FogType.LAVA || fluid == net.minecraft.world.level.material.FogType.WATER) {
+	//$$ 		fov *= net.minecraft.util.Mth.lerp(minecraft.options.fovEffectScale().get(), 1.0, 0.85714287F);
+	//$$ 	}
+	//$$ 	return (float) fov;
+	//$$ }
+	//#endif
+
+	/**
+	 * Skyrim went quiet (a long loading screen, a stall, or it closed). Its collision around the
+	 * player may be about to change (interior doors), so keep the player exactly where they were
+	 * instead of letting them fall; Skyrim puts them where they belong when it's back.
+	 */
+	private static void freezeWhileUnlinked(Minecraft minecraft) {
+		LocalPlayer player = minecraft.player;
+		if (linked || !tookOver || player == null) {
+			return;
+		}
+		if (unlinkedHold == null) {
+			unlinkedHold = player.position();
+		}
+		player.setDeltaMovement(Vec3.ZERO);
+		player.setPos(unlinkedHold.x, unlinkedHold.y, unlinkedHold.z);
+		player.xo = unlinkedHold.x;
+		player.yo = unlinkedHold.y;
+		player.zo = unlinkedHold.z;
+		player.resetFallDistance();
+	}
+
+	/**
+	 * Hands Skyrim the raw physics tick (previous + latest feet, smoothed eye height, walk bob) with a
+	 * QueryPerformanceCounter timestamp. Skyrim interpolates between them on its own frame clock,
+	 * exactly like Minecraft's renderer does with partial ticks.
+	 */
+	private static void publishTick(Minecraft minecraft) {
+		LocalPlayer player = minecraft.player;
+		if (!linked || player == null) {
+			return;
+		}
+		if (qpcFreq == 0) {
+			qpcFreq = SkyLink.qpcFrequency();
+		}
+		float tickMs = minecraft.level != null ? minecraft.level.tickRateManager().millisecondsPerTick() : 50.0F;
+		// The tick really "happened" partial ticks ago (DeltaTracker keeps the remainder).
+		//#if MC_1_21_1
+		//$$ float remainder = minecraft.getTimer().getGameTimeDeltaPartialTick(false);
+		//#else
+		float remainder = minecraft.getDeltaTracker().getGameTimeDeltaPartialTick(false);
+		//#endif
+		mc.tickQpc = SkyLink.qpc() - (long) (remainder * tickMs * qpcFreq / 1000.0);
+		mc.tickMs = tickMs;
+		mc.prevX = player.xo;
+		mc.prevY = player.yo;
+		mc.prevZ = player.zo;
+		mc.curX = player.getX();
+		mc.curY = player.getY();
+		mc.curZ = player.getZ();
+		// Same smoothing as Camera.tick(): eye height eases halfway toward the target each tick.
+		if (player != eyePlayer) {
+			eyePlayer = player;
+			eyeSmoothed = player.getEyeHeight();
+		}
+		mc.eyeHeightO = eyeSmoothed;
+		eyeSmoothed += (player.getEyeHeight() - eyeSmoothed) * 0.5F;
+		mc.eyeHeightT = eyeSmoothed;
+		boolean bob = minecraft.options.bobView().get();
+		//#if MC_1_21_1
+		//$$ // 1.21.1 keeps the walk distance and bob on the entity itself (no avatar state yet).
+		//$$ mc.walkDistO = bob ? player.walkDistO : 0.0F;
+		//$$ mc.walkDist = bob ? player.walkDist : 0.0F;
+		//$$ mc.bobO = bob ? player.oBob : 0.0F;
+		//$$ mc.bob = bob ? player.bob : 0.0F;
+		//#else
+		var avatar = player.avatarState();
+		mc.walkDistO = bob ? avatar.getInterpolatedWalkDistance(0.0F) : 0.0F;
+		mc.walkDist = bob ? avatar.getInterpolatedWalkDistance(1.0F) : 0.0F;
+		mc.bobO = bob ? avatar.getInterpolatedBob(0.0F) : 0.0F;
+		mc.bob = bob ? avatar.getInterpolatedBob(1.0F) : 0.0F;
+		//#endif
+		SkyLink.writeMcState(mc);
+	}
+
+	/** Freeze the player until Skyrim's collision around them has arrived. */
+	private static long holdLogged = -1;
+
+	private static void holdUntilReady(Minecraft minecraft) {
+		LocalPlayer player = minecraft.player;
+		if (!linked || player == null) {
+			return;
+		}
+		if (!sky.inGame() || sky.loading()) {
+			// Skyrim is on its main menu or a loading screen: park the player where they are.
+			if (holdPos == null) {
+				holdPos = player.position();
+			}
+			teleportPending = true;
+		}
+		if (holdPos == null) {
+			holdSince = 0;
+			holdLogged = -1;
+			return;
+		}
+		if (holdSince == 0) {
+			holdSince = System.currentTimeMillis();
+		}
+		int bx = (int) Math.floor(holdPos.x), by = (int) Math.floor(holdPos.y), bz = (int) Math.floor(holdPos.z);
+		boolean known = SkyCollision.isKnown(bx, by - 1, bz) && SkyCollision.isKnown(bx, by, bz)
+			&& SkyCollision.isKnown(bx, by - SkyCollision.REGION_SIZE, bz);
+		// Release once there is actual ground below (or after a timeout, e.g. when mid-air on purpose).
+		// FalloutCraft: Fallout's exact triangles under the feet count as ground too, and the wait is
+		// short (the player froze for up to half a minute waiting for voxel blocks).
+		double tri = SkyCollider.groundAt(holdPos.x, holdPos.y, holdPos.z, 2.5);
+		boolean triGround = !Double.isNaN(tri) && holdPos.y - tri < 3.0;
+		long held = System.currentTimeMillis() - holdSince;
+		boolean solid = SkyCollision.hasSolidBelow(bx, by, bz, 12);
+		boolean ready = (known && (triGround || solid || held > 1500)) || held > 3000;
+		if (!ready && held / 1000 != holdLogged) {
+			holdLogged = held / 1000;
+			SkyCraft.LOG.info("SkyCraft: holding the player {} s at {} {} {}: regions known {}, Fallout ground {}, voxel ground {}, in game {}, loading {}",
+				held / 1000, String.format("%.2f", holdPos.x), String.format("%.2f", holdPos.y), String.format("%.2f", holdPos.z), known,
+				Double.isNaN(tri) ? "none" : String.format("%.2f", tri), solid, sky.inGame(), sky.loading());
+		}
+		if (ready && sky.inGame() && !sky.loading()) {
+			// Skyrim's feet can sit a fraction of a voxel inside our ground layer. Minecraft's
+			// collision never pushes you out of a shape, so you'd drop through: lift out first.
+			Vec3 safe = liftOutOfGeometry(player, holdPos);
+			if (safe.y != holdPos.y) {
+				player.setPos(safe.x, safe.y, safe.z);
+				player.yo = safe.y;
+				SkyCraft.LOG.info("SkyCraft: lifted player {} blocks out of the ground", String.format("%.3f", safe.y - holdPos.y));
+			}
+			holdPos = null;
+			return;
+		}
+		player.setDeltaMovement(Vec3.ZERO);
+		player.setPos(holdPos.x, holdPos.y, holdPos.z);
+		player.xo = holdPos.x;
+		player.yo = holdPos.y;
+		player.zo = holdPos.z;
+		player.resetFallDistance();
+	}
+
+	private static Vec3 liftOutOfGeometry(LocalPlayer player, Vec3 pos) {
+		// Stand on the exact Skyrim ground if it is slightly above the feet (up to 2.5 blocks).
+		double ground = SkyCollider.groundAt(pos.x, pos.y, pos.z, 2.5);
+		return !Double.isNaN(ground) && ground > pos.y ? new Vec3(pos.x, ground, pos.z) : pos;
+	}
+
+	private static void requestTeleport(Minecraft minecraft, double x, double y, double z, float yaw, float pitch) {
+		LocalPlayer player = minecraft.player;
+		player.setPos(x, y, z);
+		player.setDeltaMovement(Vec3.ZERO);
+		player.resetFallDistance();
+		var server = minecraft.getSingleplayerServer();
+		if (server != null) {
+			var uuid = player.getUUID();
+			server.execute(() -> {
+				ServerPlayer sp = server.getPlayerList().getPlayer(uuid);
+				if (sp != null) {
+					sp.teleportTo(x, y, z);
+					sp.setYRot(yaw);
+					sp.setXRot(pitch);
+					sp.resetFallDistance();
+				}
+			});
+		}
+		SkyCraft.LOG.info("SkyCraft: teleported to {} {} {}", x, y, z);
+	}
+
+	/** After GameRenderer.render(): report the player to Skyrim and ship the overlay frame. */
+	public static void afterRender() {
+		if (!linked) {
+			return;
+		}
+		Minecraft minecraft = Minecraft.getInstance();
+		LocalPlayer player = minecraft.player;
+		int flags = 0;
+		if (player != null && minecraft.level != null) {
+			//#if MC_1_21_1
+			//$$ float partial = minecraft.getTimer().getGameTimeDeltaPartialTick(false);
+			//#else
+			float partial = minecraft.getDeltaTracker().getGameTimeDeltaPartialTick(false);
+			//#endif
+			Vec3 feet = player.getPosition(partial);
+			//#if MC_1_21_1
+			//$$ Camera camera = minecraft.gameRenderer.getMainCamera();
+			//#else
+			Camera camera = minecraft.gameRenderer.mainCamera();
+			//#endif
+			flags |= Proto.MC_IN_WORLD;
+			if (player.onGround()) {
+				flags |= Proto.MC_ON_GROUND;
+			}
+			if (player.isShiftKeyDown()) {
+				flags |= Proto.MC_SNEAKING;
+			}
+			if (player.isSprinting()) {
+				flags |= Proto.MC_SPRINTING;
+			}
+			if (player.isDeadOrDying()) {
+				flags |= Proto.MC_DEAD;
+			}
+			if (player.isSwimming()) {
+				flags |= Proto.MC_SWIMMING;
+			}
+			if (player.getAbilities().flying) {
+				flags |= Proto.MC_FLYING;
+			}
+			// FalloutCraft: Fallout's health bar follows Minecraft's hearts.
+			if (player.getMaxHealth() > 0.0F) {
+				mc.health = player.getHealth() / player.getMaxHealth();
+				flags |= Proto.MC_HEALTH_VALID;
+			}
+			mc.x = feet.x;
+			mc.y = feet.y;
+			mc.z = feet.z;
+			mc.yaw = player.getYRot();
+			mc.pitch = player.getXRot();
+			// The eye, not the camera: in third person Minecraft's camera sits behind or in front.
+			//#if MC_1_21_1
+			//$$ Vec3 eye = camera.isDetached() ? player.getEyePosition(partial) : camera.getPosition();
+			//#else
+			Vec3 eye = camera.isDetached() ? player.getEyePosition(partial) : camera.position();
+			//#endif
+			mc.eyeHeight = (float) (eye.y - feet.y);
+			mc.eyeX = eye.x;
+			mc.eyeY = eye.y;
+			mc.eyeZ = eye.z;
+			//#if MC_1_21_1
+			//$$ mc.fov = fov(minecraft, camera, partial);
+			//#else
+			mc.fov = camera.getFov();
+			//#endif
+			// Minecraft's F5 camera: Skyrim puts its camera where Minecraft's would be.
+			mc.cameraMode = minecraft.options.getCameraType().ordinal();
+			//#if MC_1_21_1
+			//$$ mc.cameraDistance = camera.isDetached() ? (float) camera.getPosition().distanceTo(player.getEyePosition(partial)) : 0.0F;
+			//$$ // Walk bob, exactly what GameRenderer.bobView() uses this frame (1.21.1 reads the camera entity).
+			//$$ boolean bob = minecraft.options.bobView().get() && minecraft.getCameraEntity() instanceof net.minecraft.world.entity.player.Player;
+			//$$ if (bob) {
+			//$$ 	net.minecraft.world.entity.player.Player camPlayer = (net.minecraft.world.entity.player.Player) minecraft.getCameraEntity();
+			//$$ 	mc.bobPhase = -(camPlayer.walkDist + (camPlayer.walkDist - camPlayer.walkDistO) * partial);
+			//$$ 	mc.bobAmount = net.minecraft.util.Mth.lerp(partial, camPlayer.oBob, camPlayer.bob);
+			//$$ } else {
+			//$$ 	mc.bobPhase = 0.0F;
+			//$$ 	mc.bobAmount = 0.0F;
+			//$$ }
+			//#else
+			mc.cameraDistance = camera.isDetached() ? (float) camera.position().distanceTo(player.getEyePosition(partial)) : 0.0F;
+			// Walk bob, exactly what GameRenderer.bobView() uses this frame.
+			var entityState = minecraft.gameRenderer.gameRenderState().levelRenderState.cameraRenderState.entityRenderState;
+			boolean bob = minecraft.options.bobView().get() && entityState.isPlayer;
+			mc.bobPhase = bob ? entityState.backwardsInterpolatedWalkDistance : 0.0F;
+			mc.bobAmount = bob ? entityState.bob : 0.0F;
+			//#endif
+		}
+		//#if MC_1_21_1
+		//$$ if (minecraft.screen != null) {
+		//#else
+		if (minecraft.gui.screen() != null) {
+		//#endif
+			flags |= Proto.MC_SCREEN_OPEN;
+		}
+		mc.flags = flags;
+		mc.sensitivity = minecraft.options.sensitivity().get().floatValue();
+		mc.teleportAck = holdPos == null ? teleportAck : teleportAck - 1; // not "arrived" until we are released
+		//#if MC_1_21_1
+		//$$ mc.guiScale = (int) minecraft.getWindow().getGuiScale();
+		//#else
+		mc.guiScale = minecraft.getWindow().getGuiScale();
+		//#endif
+		mc.frameCounter = ++frameCounter;
+		SkyLink.writeMcState(mc);
+
+		if ((flags & Proto.MC_IN_WORLD) != 0) {
+			try {
+				//#if MC_1_21_1
+				//$$ WorldExporter.frame(minecraft, minecraft.getTimer().getGameTimeDeltaPartialTick(false));
+				//#else
+				WorldExporter.frame(minecraft, minecraft.getDeltaTracker().getGameTimeDeltaPartialTick(false));
+				//#endif
+			} catch (RuntimeException e) {
+				if (exporterErrors++ < 5) {
+					SkyCraft.LOG.error("SkyCraft: world export failed", e);
+				}
+			}
+			FrameExporter.capture(minecraft);
+		}
+	}
+
+	/** End of the frame: render at most once per Skyrim frame instead of spinning freely. */
+	public static void paceFrame() {
+		if (!linked) {
+			return;
+		}
+		if (skyrimStalled && (SkyLink.skyStateSeq() >>> 1) == lastPacedSeq) {
+			return; // Skyrim is paused (menu / alt-tab): don't block every frame waiting for it
+		}
+		skyrimStalled = false;
+		long deadline = System.nanoTime() + 25_000_000L;
+		// SkyState.seq advances by 2 per Skyrim frame (odd while writing).
+		while ((SkyLink.skyStateSeq() >>> 1) == lastPacedSeq && System.nanoTime() < deadline) {
+			Thread.onSpinWait();
+			if (deadline - System.nanoTime() > 2_000_000L) {
+				Thread.yield();
+			}
+		}
+		int seqNow = SkyLink.skyStateSeq() >>> 1;
+		skyrimStalled = seqNow == lastPacedSeq;
+		lastPacedSeq = seqNow;
+	}
+
+	private static void applyLinkedOptions() {
+		Minecraft minecraft = Minecraft.getInstance();
+		var options = minecraft.options;
+		options.pauseOnLostFocus = false;
+		//#if MC_1_21_1
+		//$$ // 1.21.1 has no vignette option (the vignette only shows in Fancy graphics; nothing to turn off).
+		//#else
+		options.vignette().set(false);
+		//#endif
+		options.enableVsync().set(false);
+		options.framerateLimit().set(260);
+		// Minecraft doesn't draw the world itself; these only decide how far out placed blocks,
+		// arrows and Skyrim NPC stand-ins stay loaded and simulated.
+		options.renderDistance().set(8);
+		options.simulationDistance().set(8);
+		options.autoJump().set(false);
+		options.onboardAccessibility = false;
+		if (options.tutorialStep != net.minecraft.client.tutorial.TutorialSteps.NONE) {
+			minecraft.getTutorial().setStep(net.minecraft.client.tutorial.TutorialSteps.NONE);
+		}
+		options.getSoundSourceOptionInstance(net.minecraft.sounds.SoundSource.MUSIC).set(0.0);
+		options.save();
+	}
+
+	private static void hideWindowOnce(Minecraft minecraft) {
+		if (windowHidden || SHOW_WINDOW) {
+			return;
+		}
+		windowHidden = true;
+		//#if MC_1_21_1
+		//$$ GLFW.glfwHideWindow(minecraft.getWindow().getWindow());
+		//#else
+		SDLVideo.SDL_HideWindow(minecraft.getWindow().handle());
+		//#endif
+		SkyCraft.LOG.info("SkyCraft: game window hidden (run with -Dskycraft.showWindow=true to keep it)");
+	}
+
+	private static void applyViewportSize(Minecraft minecraft) {
+		int w = Math.min(sky.viewportW, Proto.MAX_OVERLAY_W);
+		int h = Math.min(sky.viewportH, Proto.MAX_OVERLAY_H);
+		if (w <= 0 || h <= 0 || (w == appliedViewportW && h == appliedViewportH)) {
+			return;
+		}
+		appliedViewportW = w;
+		appliedViewportH = h;
+		minecraft.getWindow().setWindowed(w, h);
+		SkyCraft.LOG.info("SkyCraft: sizing overlay to Skyrim viewport {}x{}", w, h);
+	}
+}

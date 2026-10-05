@@ -1,0 +1,65 @@
+{
+  "dll": {
+    "file": "commonlibf4-template.dll",
+    "sha256": "7467081787e80b3388cdb15dfd9fce2778a83f7fb9d0a1b715c1351b4aeb0c30",
+    "size": 3114496,
+    "rebuild_sha256": "7467081787e80b3388cdb15dfd9fce2778a83f7fb9d0a1b715c1351b4aeb0c30"
+  },
+  "sources": {
+    "FalloutCraft": {
+      "url": "https://github.com/zeyvu/FalloutCraft",
+      "commit": "70032ac7ec66749a45099e08611f9ec9c399235b",
+      "dirty": false
+    },
+    "commonlibf4-template": {
+      "url": "https://github.com/libxse/commonlibf4-template",
+      "commit": "e70c24ab6d1b12478a9fc09ff99aedb73d1f394a",
+      "dirty": false
+    },
+    "commonlibf4": {
+      "url": "https://github.com/libxse/commonlibf4",
+      "commit": "16cff6870d92d0018e25c971a7bbd42d91f97871",
+      "dirty": false
+    },
+    "commonlib-shared": {
+      "url": "https://github.com/libxse/commonlib-shared",
+      "commit": "9fbb74d628134ab4ea3a3cf5c0ed3f7eeabbd01d",
+      "dirty": false
+    },
+    "xmake-repo": {
+      "url": "https://github.com/xmake-io/xmake-repo",
+      "commit": "8238b08ac745dd641958d827149689c6c2f592a7"
+    }
+  },
+  "packages": {
+    "spdlog": {
+      "version": "v1.16.0",
+      "source": "https://github.com/gabime/spdlog/archive/refs/tags/v1.16.0.zip",
+      "commit": "486b55554f11c9cccc913e11a87085b2a91f706f",
+      "license": "MIT",
+      "configs": "header_only=false, wchar=true, std_format=true"
+    },
+    "build_tools_from_xmake_repo": {
+      "cmake": "4.3.4",
+      "ninja": "v1.13.2",
+      "note": "used to build spdlog, not linked"
+    }
+  },
+  "toolchain": {
+    "visual_studio": "Visual Studio Build Tools 2026 18.10.3",
+    "msvc": "14.51.36231",
+    "cl": "Microsoft (R) C/C++ Optimizing Compiler Version 19.51.36260 for x64",
+    "windows_sdk": "10.0.26100.0",
+    "xmake": "xmake v3.1.1+HEAD.3ba37a0d4",
+    "git": "git version 2.56.0.windows.1",
+    "os": "Microsoft Windows Server 2025 Datacenter 10.0.26100.0"
+  },
+  "commands": [
+    "xmake f -c -y -p windows -a x64 -m release --policies=package.requires_lock --cxflags=/Brepro --ldflags=/Brepro --shflags=/Brepro",
+    "xmake build -r -y"
+  ],
+  "work": "C:\\fcbuild",
+  "built_at": "2026-10-05T15:19:53.7477397Z",
+  "machine": "temporary AWS EC2 c6i.2xlarge, Windows_Server-2025-English-Full-Base-2026.09.17 (ami-0366b6e53cea2815d), eu-west-1, via SSM Run Command (SYSTEM)",
+  "script": "orchestrator/scripts/build-falloutcraft.ps1 -InstallTools -VerifyRepro"
+}

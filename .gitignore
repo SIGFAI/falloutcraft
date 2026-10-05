@@ -1,0 +1,27 @@
+# gradle / loom
+fabric/.gradle/
+fabric/build/
+fabric/run/
+fabric/out/
+# cmake / vcpkg
+skse/build/
+skse/vcpkg_installed/
+# ide
+.vs/
+.idea/
+*.iml
+.tools/
+# release packaging
+dist/
+# local tools and settings
+CMakeUserPresets.json
+fabric/run-guest*/
+__pycache__/
+*.pyc
+
+commonlibf4-template/
+# Minecraft 1.21.1 builds
+versions/1.21.1/*/.gradle/
+versions/1.21.1/*/build/
+versions/1.21.1/*/run/
+versions/1.21.1/*/runs/

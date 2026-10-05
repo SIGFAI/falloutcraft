@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "skycraft",
+  "version": "${version}",
+  "name": "FalloutCraft",
+  "description": "Play Fallout 4 as a Minecraft player: Minecraft physics, inventory, HUD, building and combat inside the Commonwealth. Based on SkyCraft by chasmlol.",
+  "authors": ["zeyvu", "chasmlol (SkyCraft)"],
+  "contact": {
+    "sources": "https://github.com/zeyvu/FalloutCraft"
+  },
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "main": ["dev.skycraft.fabric.SkyCraftFabric"],
+    "client": ["dev.skycraft.client.fabric.SkyCraftClientFabric"]
+  },
+  "mixins": [
+    "skycraft.mixins.json",
+    { "config": "skycraft.client.mixins.json", "environment": "client" }
+  ],
+  "depends": {
+    "fabricloader": ">=0.19.5",
+    "minecraft": "~26.3",
+    "java": ">=25",
+    "fabric-api": "*"
+  }
+}

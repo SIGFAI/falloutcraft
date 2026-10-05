@@ -1,0 +1,31 @@
+{
+    __meta__ = {
+        version = "1.0"
+    },
+    ["windows|x64"] = {
+        ["cmake#f56260b5"] = {
+            repo = {
+                branch = "master",
+                commit = "8238b08ac745dd641958d827149689c6c2f592a7",
+                url = "https://github.com/xmake-io/xmake-repo.git"
+            },
+            version = "4.3.4"
+        },
+        ["ninja#f56260b5"] = {
+            repo = {
+                branch = "master",
+                commit = "8238b08ac745dd641958d827149689c6c2f592a7",
+                url = "https://github.com/xmake-io/xmake-repo.git"
+            },
+            version = "v1.13.2"
+        },
+        ["spdlog v1.16.0#09c8c173"] = {
+            repo = {
+                branch = "master",
+                commit = "8238b08ac745dd641958d827149689c6c2f592a7",
+                url = "https://github.com/xmake-io/xmake-repo.git"
+            },
+            version = "v1.16.0"
+        }
+    }
+}
