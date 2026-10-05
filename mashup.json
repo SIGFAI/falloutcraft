@@ -174,9 +174,12 @@
   "idea_by": "zeyvu",
   "built_at": "2026-10-05T19:41:47.626Z",
   "notes": [
-    "Fallout 4 on the next-gen runtime 1.11.240 with F4SE 0.7.9 and the Address Library for F4SE (All in One). The old-gen 1.10.163 runtime is not supported.",
-    "Start Minecraft first, then Fallout 4 through f4se_loader.exe and load a save made after Vault 111. They link through shared memory and reconnect if either restarts.",
-    "The SIGF app starts the Minecraft side first as its own Prism instance, then the game through its script extender loader (Steam is opened first when it is not running).",
-    "The Fabric 26.3 build only; upstream also ships a NeoForge 1.21.1 jar (not packaged here)."
-  ]
+    "How it works: you play Fallout 4 as a Minecraft player: Minecraft runs hidden in the background and drives your character (movement, inventory, hearts, blocks, combat) while Fallout 4 draws the Commonwealth.",
+    "Press Play: Minecraft starts first, then Fallout 4 through f4se_loader.exe. Load a save made after Vault 111. The two link through shared memory and reconnect if either restarts.",
+    "Keys: Fallout keeps E activate (doors, NPCs, containers, terminals, workbenches), Tab Pip-Boy, Esc pause menu, ~ console, F9 quickload. Minecraft: I inventory, Shift sprint, Ctrl crouch, O Minecraft pause menu, F5 camera, T chat, hotbar and mouse as usual.",
+    "Install these yourself: Fallout 4 on the next-gen runtime 1.11.240 (the old-gen 1.10.163 runtime is not supported), F4SE 0.7.9, Address Library for F4SE (All in One). You also need Minecraft: Java Edition and about 3 GB of extra RAM.",
+    "Fallout's weapons and VATS are unavailable while Minecraft drives you; stimpaks and Fallout food don't restore hearts (eat Minecraft food). No multiplayer, no digging into terrain. Camera/movement mods and Minecraft shader or Sodium-style mods conflict.",
+    "Early and experimental upstream: back up your saves. The author's repo has no issue tracker: report bugs on SIGF's copy with the Report a bug link."
+  ],
+  "issues": "https://github.com/SIGFAI/falloutcraft/issues"
 }
