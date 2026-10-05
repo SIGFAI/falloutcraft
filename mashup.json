@@ -3,6 +3,13 @@
   "version": "0.1.3",
   "name": "FalloutCraft",
   "tagline": "Play Fallout 4 as a Minecraft player: Minecraft physics, inventory, blocks and combat inside the Commonwealth (F4SE plugin + Fabric mod). Built on SkyCraft.",
+  "how_to_play": [
+    "Play Fallout 4 as a Minecraft player: Minecraft drives your movement, inventory, hearts, blocks and combat in the Commonwealth.",
+    "Press Play: Minecraft starts first, then Fallout 4; load a save made after Vault 111.",
+    "Minecraft keys: I inventory, Shift sprint, Ctrl crouch, O Minecraft pause menu, F5 camera, T chat, hotbar and mouse as usual.",
+    "Fallout keeps E to activate doors, NPCs, containers and workbenches, Tab Pip-Boy, Esc pause, F9 quickload.",
+    "Eat Minecraft food to restore hearts; Fallout's weapons and VATS are off while Minecraft drives."
+  ],
   "kind": "passthrough",
   "games": [
     {
