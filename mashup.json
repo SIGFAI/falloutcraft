@@ -152,6 +152,17 @@
     }
   },
   "media": {},
+  "server": {
+    "game": "minecraft",
+    "mc": "26.3",
+    "loader": "fabric@0.19.5",
+    "ram_gb": 2,
+    "max_players": 10,
+    "pack": "falloutcraft.mrpack",
+    "load_on_server": [
+      "skycraft"
+    ]
+  },
   "built_by": {
     "author": "zeyvu",
     "authors": [
@@ -161,7 +172,7 @@
     "packaged_by": "SIGF"
   },
   "idea_by": "zeyvu",
-  "built_at": "2026-10-05T15:37:35.958Z",
+  "built_at": "2026-10-05T19:41:47.626Z",
   "notes": [
     "Fallout 4 on the next-gen runtime 1.11.240 with F4SE 0.7.9 and the Address Library for F4SE (All in One). The old-gen 1.10.163 runtime is not supported.",
     "Start Minecraft first, then Fallout 4 through f4se_loader.exe and load a save made after Vault 111. They link through shared memory and reconnect if either restarts.",
